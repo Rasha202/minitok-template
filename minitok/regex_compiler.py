@@ -32,13 +32,21 @@ def parse(regex: str) -> _Node:
             tokens.append(("literal", regex[i + 1]))
             i += 2
 
-        elif regex.startswith("<letter>", i):
-            tokens.append(("class", "<letter>"))
-            i += len("<letter>")
+        elif c == "<":
+            end = regex.find(">", i)
 
-        elif regex.startswith("<digit>", i):
-            tokens.append(("class", "<digit>"))
-            i += len("<digit>")
+            if end == -1:
+                raise RegexSyntaxError("Unclosed shorthand class")
+
+            shorthand = regex[i:end + 1]
+
+            if shorthand not in ("<letter>", "<digit>"):
+                raise RegexSyntaxError(
+                    f"Unknown shorthand class: {shorthand}"
+                )
+
+            tokens.append(("class", shorthand))
+            i = end + 1
 
         elif c in ("|", "*", "(", ")"):
             tokens.append(("operator", c))
@@ -56,6 +64,13 @@ def parse(regex: str) -> _Node:
 
         while pos < len(tokens) and tokens[pos] == ("operator", "|"):
             pos += 1
+
+            if pos >= len(tokens) or tokens[pos] in (
+                ("operator", "|"),
+                ("operator", ")"),
+            ):
+                raise RegexSyntaxError("Missing expression after |")
+
             right = parse_concat()
             left = _Node("union", children=[left, right])
 
@@ -168,7 +183,9 @@ def compile_regex(regex: str) -> NFA:
             accept = new_state()
 
             if node.value == "<letter>":
-                chars = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+                chars = set(
+                    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                )
             else:
                 chars = set("0123456789")
 
