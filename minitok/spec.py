@@ -1,4 +1,4 @@
-r"""Part A1 — Token specification loader and validator.
+"""Part A1 — Token specification loader and validator.
 
 A token specification is a JSON object:
 
@@ -72,7 +72,6 @@ def load_spec(source: str | Path) -> TokenSpec:
     Returns a TokenSpec preserving the declared order (order defines
     priority for maximal-munch tie-breaking: earlier = higher priority).
     """
-    # TODO(PART A1): implement
     if isinstance(source, Path):
         try:
             content = source.read_text(encoding="utf-8")
@@ -128,7 +127,6 @@ def load_spec(source: str | Path) -> TokenSpec:
 
 def _validate_regex_syntax(regex: str, token_name: str) -> None:
     """Helper to validate regex structure, balancing, shorthands, and non-empty matching."""
-    # Check parentheses balance and unknown shorthand classes
     paren_count = 0
     i = 0
     n = len(regex)
@@ -161,16 +159,12 @@ def _validate_regex_syntax(regex: str, token_name: str) -> None:
     if paren_count != 0:
         raise SpecError(f"Token '{token_name}': unbalanced parentheses")
 
-    # Check if the regex can trivially match empty string (e.g. ends with unescaped '*' where previous can be empty or explicit empty patterns)
-    # In minitok spec, '*' means one or more repetitions, but if someone puts something that evaluates to empty or invalid, catch it.
-    # Also, we can test compilation or check if the compiled NFA can accept empty string.
     try:
-        from .regex import compile_regex
-        nfa = compile_regex(regex)
+        from minitok.regex_compiler import regex_compiler
+        nfa = regex_compiler(regex)
         if nfa.simulate(""):
             raise SpecError(f"Token '{token_name}': regex can match the empty string")
     except SpecError:
         raise
     except Exception:
-        # If compilation fails due to general syntax error, let regex compiler raise it or handle here
         pass
