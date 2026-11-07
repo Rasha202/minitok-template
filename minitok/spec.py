@@ -72,5 +72,10 @@ def load_spec(source: str | Path) -> TokenSpec:
     Returns a TokenSpec preserving the declared order (order defines
     priority for maximal-munch tie-breaking: earlier = higher priority).
     """
-    # TODO(PART A1): implement
-    raise NotImplementedError("load_spec is not implemented yet (Part A1)")
+      if isinstance(source, Path):
+        data = json.loads(source.read_text(encoding="utf-8"))
+    else:
+        try:
+            data = json.loads(source)
+        except json.JSONDecodeError as e:
+            raise SpecError(f"Invalid JSON: {e}") from e
