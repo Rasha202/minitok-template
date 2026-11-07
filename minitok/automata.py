@@ -155,7 +155,7 @@ def determinize(
 
 
 def build_token_dfa(spec: "TokenSpec") -> DFA:
-    from regex_compiler import compile_regex
+    from .regex_compiler import compile_regex
 
     combined = NFA()
     combined.start = 0
