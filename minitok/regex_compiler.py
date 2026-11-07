@@ -1,27 +1,11 @@
-"""Part A2 — Regular-expression compiler: regex -> NFA (Thompson's construction).
 
-Grammar you must support (see spec.py for the surface syntax):
-
-    union   := concat ('|' concat)*
-    concat  := star+
-    star    := atom '*'*
-    atom    := LITERAL | CLASS | '(' union ')'
-    CLASS   := '<letter>' | '<digit>'
-    LITERAL := alnum | escaped operator char | space | '_' | '.' etc.
-
-Design guidance:
-  - Parse to an AST (or postfix) with correct precedence (* > concat > |).
-  - Compile each AST node to an NFA fragment following Sipser's inductive
-    construction (§1.3): one start state, one accept state per fragment.
-  - Remember: postfix '*' in THIS spec means "one or more" (a+), so
-    `a*` compiles as concat(a, closure(a)). Empty matches must be impossible.
-"""
+"""Part A2 — Regular-expression compiler: regex -> NFA."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from minitok.automata import NFA, EPS
+from .automata import NFA, EPS
 
 
 class RegexSyntaxError(ValueError):
@@ -30,248 +14,266 @@ class RegexSyntaxError(ValueError):
 
 @dataclass
 class _Node:
-    """Suggested AST node. You may use your own representation."""
-
-    kind: str  # 'literal' | 'class' | 'union' | 'concat' | 'plus'
+    kind: str
     value: str = ""
     children: list["_Node"] | None = None
 
 
 def parse(regex: str) -> _Node:
-    """Parse a regex string into an AST. Raise RegexSyntaxError on bad input."""
     tokens = []
     i = 0
-    n = len(regex)
-    
-    while i < n:
+
+    while i < len(regex):
         c = regex[i]
-        if c == '\\':
-            if i + 1 >= n:
+
+        if c == "\\":
+            if i + 1 >= len(regex):
                 raise RegexSyntaxError("Trailing backslash in regex")
-            tokens.append(regex[i:i+2])
+            tokens.append(("literal", regex[i + 1]))
             i += 2
-        elif c == '<':
-            end = regex.find('>', i)
+
+        elif c == "<":
+            end = regex.find(">", i)
             if end == -1:
                 raise RegexSyntaxError("Unterminated character class")
-            tokens.append(regex[i:end+1])
+
+            shorthand = regex[i:end + 1]
+            if shorthand not in ("<letter>", "<digit>"):
+                raise RegexSyntaxError(
+                    f"Unknown shorthand class: {shorthand}"
+                )
+
+            tokens.append(("class", shorthand))
             i = end + 1
-        else:
-            tokens.append(c)
+
+        elif c in ("|", "*", "(", ")"):
+            tokens.append(("operator", c))
             i += 1
 
-    # Insert explicit concatenation tokens where needed
-    explicit_tokens = []
-    for idx, tok in enumerate(tokens):
-        if idx > 0:
-            prev = tokens[idx - 1]
-            prev_is_op_or_open = prev == '|' or prev == '('
-            curr_is_op_or_close = tok == '|' or tok == '*' or tok == ')'
-            if not prev_is_op_or_open and not curr_is_op_or_close:
-                explicit_tokens.append('.')
-        explicit_tokens.append(tok)
+        else:
+            tokens.append(("literal", c))
+            i += 1
 
-    # Shunting-yard algorithm to convert infix to postfix (AST)
-    # Precedence: '*' (unary postfix) > '.' (concat) > '|' (union)
-    precedence = {'*': 3, '.': 2, '|': 1}
-    output = []
-    operators = []
+    pos = 0
 
-    for tok in explicit_tokens:
-        if tok == '(':
-            operators.append(tok)
-        elif tok == ')':
-            while operators and operators[-1] != '(':
-                output.append(operators.pop())
-            if not operators:
+    def parse_union():
+        nonlocal pos
+        left = parse_concat()
+
+        while pos < len(tokens) and tokens[pos] == ("operator", "|"):
+            pos += 1
+            right = parse_concat()
+            left = _Node("union", children=[left, right])
+
+        return left
+
+    def parse_concat():
+        nonlocal pos
+
+        if pos >= len(tokens):
+            raise RegexSyntaxError("Missing expression")
+
+        if tokens[pos] in (
+            ("operator", "|"),
+            ("operator", ")"),
+        ):
+            raise RegexSyntaxError("Invalid concatenation")
+
+        left = parse_star()
+
+        while pos < len(tokens):
+            if tokens[pos] == ("operator", "|") or tokens[pos] == ("operator", ")"):
+                break
+
+            right = parse_star()
+            left = _Node("concat", children=[left, right])
+
+        return left
+
+    def parse_star():
+        nonlocal pos
+        node = parse_atom()
+
+        while pos < len(tokens) and tokens[pos] == ("operator", "*"):
+            pos += 1
+            node = _Node("plus", children=[node])
+
+        return node
+
+    def parse_atom():
+        nonlocal pos
+
+        if pos >= len(tokens):
+            raise RegexSyntaxError("Missing expression")
+
+        kind, value = tokens[pos]
+
+        if kind == "literal":
+            pos += 1
+            return _Node("literal", value=value)
+
+        if kind == "class":
+            pos += 1
+            return _Node("class", value=value)
+
+        if value == "(":
+            pos += 1
+            node = parse_union()
+
+            if pos >= len(tokens) or tokens[pos] != ("operator", ")"):
                 raise RegexSyntaxError("Mismatched parentheses")
-            operators.pop()  # pop '('
-        elif tok in precedence:
-            while (operators and operators[-1] != '(' and 
-                   precedence.get(operators[-1], 0) >= precedence[tok]):
-                output.append(operators.pop())
-            operators.append(tok)
-        else:
-            output.append(tok)
 
-    while operators:
-        op = operators.pop()
-        if op == '(' or op == ')':
-            raise RegexSyntaxError("Mismatched parentheses")
-        output.append(op)
+            pos += 1
+            return node
 
-    # Build AST from postfix expression
-    stack = []
-    for tok in output:
-        if tok in precedence:
-            if tok == '*':
-                if not stack:
-                    raise RegexSyntaxError("Invalid operator placement '*'")
-                child = stack.pop()
-                stack.append(_Node(kind='plus', children=[child]))
-            else:
-                if len(stack) < 2:
-                    raise RegexSyntaxError(f"Invalid operator placement '{tok}'")
-                right = stack.pop()
-                left = stack.pop()
-                kind = 'union' if tok == '|' else 'concat'
-                stack.append(_Node(kind=kind, children=[left, right]))
-        else:
-            if tok.startswith('<') and tok.endswith('>'):
-                stack.append(_Node(kind='class', value=tok))
-            elif tok.startswith('\\'):
-                stack.append(_Node(kind='literal', value=tok[1]))
-            else:
-                stack.append(_Node(kind='literal', value=tok))
+        raise RegexSyntaxError(f"Invalid atom: {value}")
 
-    if len(stack) != 1:
+    if not tokens:
+        raise RegexSyntaxError("Empty regex")
+
+    result = parse_union()
+
+    if pos != len(tokens):
         raise RegexSyntaxError("Invalid regex structure")
-    return stack[0]
+
+    return result
 
 
 def compile_regex(regex: str) -> NFA:
-    """Compile a regex string to an NFA (see automata.NFA for the model).
+    """Compile a regex into an NFA using Thompson's construction."""
 
-    The returned NFA must accept exactly the (non-empty) language of the
-    regex, have exactly one start state and one accept state, and use
-    epsilon transitions as needed (automata.EPS).
-    """
     ast = parse(regex)
     state_counter = 0
 
-    def new_state() -> int:
+    def new_state():
         nonlocal state_counter
-        s = state_counter
+        state = state_counter
         state_counter += 1
-        return s
+        return state
 
-    def _build_nfa(node: _Node) -> NFA:
-        if node.kind == 'literal':
-            s = new_state()
-            a = new_state()
-            char = node.value
+    def add_epsilon(transitions, source, destination):
+        transitions.setdefault(source, {})
+        transitions[source].setdefault(EPS, set())
+        transitions[source][EPS].add(destination)
+
+    def build(node):
+        if node.kind == "literal":
+            start = new_state()
+            accept = new_state()
+
             return NFA(
-                states={s, a},
-                alphabet={char},
-                transitions={s: {char: {a}}},
-                start=s,
-                accepts={a}
+                states={start, accept},
+                alphabet={node.value},
+                transitions={start: {node.value: {accept}}},
+                start=start,
+                accepts={accept}
             )
-        elif node.kind == 'class':
-            s = new_state()
-            a = new_state()
-            if node.value == '<letter>':
-                chars = {chr(c) for c in range(ord('a'), ord('z')+1)} | {chr(c) for c in range(ord('A'), ord('Z')+1)}
-            elif node.value == '<digit>':
-                chars = {chr(c) for c in range(ord('0'), ord('9')+1)}
+
+        if node.kind == "class":
+            start = new_state()
+            accept = new_state()
+
+            if node.value == "<letter>":
+                chars = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
             else:
-                chars = set()
-            return NFA(
-                states={s, a},
-                alphabet=set(chars),
-                transitions={s: {c: {a} for c in chars}},
-                start=s,
-                accepts={a}
-            )
-        elif node.kind == 'concat':
-            nfa1 = _build_nfa(node.children[0])
-            nfa2 = _build_nfa(node.children[1])
-            acc1 = list(nfa1.accepts)[0]
-            
-            transitions = dict(nfa1.transitions)
-            for st, trans in nfa2.transitions.items():
-                transitions[st] = dict(trans)
-            
-            if acc1 not in transitions:
-                transitions[acc1] = {}
-            if EPS not in transitions[acc1]:
-                transitions[acc1][EPS] = set()
-            transitions[acc1][EPS].add(nfa2.start)
-            
-            return NFA(
-                states=nfa1.states | nfa2.states,
-                alphabet=nfa1.alphabet | nfa2.alphabet,
-                transitions=transitions,
-                start=nfa1.start,
-                accepts=nfa2.accepts
-            )
-        elif node.kind == 'union':
-            nfa1 = _build_nfa(node.children[0])
-            nfa2 = _build_nfa(node.children[1])
-            s = new_state()
-            a = new_state()
-            
-            transitions = dict(nfa1.transitions)
-            for st, trans in nfa2.transitions.items():
-                transitions[st] = dict(trans)
-            
-            transitions[s] = {EPS: {nfa1.start, nfa2.start}}
-            
-            acc1 = list(nfa1.accepts)[0]
-            acc2 = list(nfa2.accepts)[0]
-            
-            if acc1 not in transitions:
-                transitions[acc1] = {}
-            if EPS not in transitions[acc1]:
-                transitions[acc1][EPS] = set()
-            transitions[acc1][EPS].add(a)
-            
-            if acc2 not in transitions:
-                transitions[acc2] = {}
-            if EPS not in transitions[acc2]:
-                transitions[acc2][EPS] = set()
-            transitions[acc2][EPS].add(a)
-            
-            return NFA(
-                states=nfa1.states | nfa2.states | {s, a},
-                alphabet=nfa1.alphabet | nfa2.alphabet,
-                transitions=transitions,
-                start=s,
-                accepts={a}
-            )
-        elif node.kind == 'plus':
-            child = node.children[0]
-            nfa_base = _build_nfa(child)
-            
-            nfa_star = _build_nfa(child)
-            s_star = new_state()
-            a_star = new_state()
-            
-            transitions = dict(nfa_star.transitions)
-            transitions[s_star] = {EPS: {nfa_star.start, a_star}}
-            acc_star = list(nfa_star.accepts)[0]
-            if acc_star not in transitions:
-                transitions[acc_star] = {}
-            if EPS not in transitions[acc_star]:
-                transitions[acc_star][EPS] = set()
-            transitions[acc_star][EPS].update({nfa_star.start, a_star})
-            
-            star_nfa = NFA(
-                states=nfa_star.states | {s_star, a_star},
-                alphabet=nfa_star.alphabet,
-                transitions=transitions,
-                start=s_star,
-                accepts={a_star}
-            )
-            
-            acc_base = list(nfa_base.accepts)[0]
-            final_transitions = dict(nfa_base.transitions)
-            for st, trans in star_nfa.transitions.items():
-                final_transitions[st] = dict(trans)
-            
-            if acc_base not in final_transitions:
-                final_transitions[acc_base] = {}
-            if EPS not in final_transitions[acc_base]:
-                final_transitions[acc_base][EPS] = set()
-            final_transitions[acc_base][EPS].add(star_nfa.start)
-            
-            return NFA(
-                states=nfa_base.states | star_nfa.states,
-                alphabet=nfa_base.alphabet | star_nfa.alphabet,
-                transitions=final_transitions,
-                start=nfa_base.start,
-                accepts=star_nfa.accepts
-            )
-        return NFA()
+                chars = set("0123456789")
 
-    return _build_nfa(ast)
+            return NFA(
+                states={start, accept},
+                alphabet=chars,
+                transitions={
+                    start: {char: {accept} for char in chars}
+                },
+                start=start,
+                accepts={accept}
+            )
+
+        if node.kind == "concat":
+            left = build(node.children[0])
+            right = build(node.children[1])
+
+            transitions = {
+                state: {
+                    symbol: set(destinations)
+                    for symbol, destinations in edges.items()
+                }
+                for state, edges in left.transitions.items()
+            }
+
+            for state, edges in right.transitions.items():
+                transitions[state] = {
+                    symbol: set(destinations)
+                    for symbol, destinations in edges.items()
+                }
+
+            for accept in left.accepts:
+                add_epsilon(transitions, accept, right.start)
+
+            return NFA(
+                states=left.states | right.states,
+                alphabet=left.alphabet | right.alphabet,
+                transitions=transitions,
+                start=left.start,
+                accepts=set(right.accepts)
+            )
+
+        if node.kind == "union":
+            left = build(node.children[0])
+            right = build(node.children[1])
+
+            start = new_state()
+            accept = new_state()
+
+            transitions = {
+                state: {
+                    symbol: set(destinations)
+                    for symbol, destinations in edges.items()
+                }
+                for state, edges in left.transitions.items()
+            }
+
+            for state, edges in right.transitions.items():
+                transitions[state] = {
+                    symbol: set(destinations)
+                    for symbol, destinations in edges.items()
+                }
+
+            add_epsilon(transitions, start, left.start)
+            add_epsilon(transitions, start, right.start)
+
+            for state in left.accepts | right.accepts:
+                add_epsilon(transitions, state, accept)
+
+            return NFA(
+                states=left.states | right.states | {start, accept},
+                alphabet=left.alphabet | right.alphabet,
+                transitions=transitions,
+                start=start,
+                accepts={accept}
+            )
+
+        if node.kind == "plus":
+            child = build(node.children[0])
+
+            transitions = {
+                state: {
+                    symbol: set(destinations)
+                    for symbol, destinations in edges.items()
+                }
+                for state, edges in child.transitions.items()
+            }
+
+            for accept in child.accepts:
+                add_epsilon(transitions, accept, child.start)
+
+            return NFA(
+                states=set(child.states),
+                alphabet=set(child.alphabet),
+                transitions=transitions,
+                start=child.start,
+                accepts=set(child.accepts)
+            )
+
+        raise RegexSyntaxError(f"Unknown node type: {node.kind}")
+
+    return build(ast)
