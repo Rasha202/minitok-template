@@ -45,7 +45,16 @@ class NFA:
         """True iff this NFA accepts string s (on-the-fly subset simulation
         with epsilon closures). Must handle epsilon cycles."""
         # TODO(PART A2/A3): implement
-        raise NotImplementedError("NFA.simulate is not implemented yet")
+        current_states = eps_closure(self, {self.start})
+        for char in s:
+            next_states = set()
+            for state in current_states:
+                if state in self.transitions and char in self.transitions[state]:
+                    next_states.update(self.transitions[state][char])
+            current_states = eps_closure(self, next_states)
+            if not current_states:
+                return False
+        return bool(current_states & self.accepts)
 
 
 @dataclass
@@ -60,7 +69,13 @@ class DFA:
     def simulate(self, s: str) -> str | None:
         """Return the accepting label for s, or None if rejected/incomplete."""
         # TODO(PART A3): implement
-        raise NotImplementedError("DFA.simulate is not implemented yet")
+        curr = self.start
+        for char in s:
+            if curr in self.transitions and char in self.transitions[curr]:
+                curr = self.transitions[curr][char]
+            else:
+                return None
+        return self.accepts.get(curr)
 
 
 @dataclass
@@ -73,7 +88,16 @@ class Token:
 def eps_closure(nfa: NFA, states: set[int]) -> set[int]:
     """Epsilon closure of a set of NFA states."""
     # TODO(PART A2/A3): implement
-    raise NotImplementedError("eps_closure is not implemented yet")
+    closure = set(states)
+    stack = list(states)
+    while stack:
+        state = stack.pop()
+        if state in nfa.transitions and EPS in nfa.transitions[state]:
+            for next_state in nfa.transitions[state][EPS]:
+                if next_state not in closure:
+                    closure.add(next_state)
+                    stack.append(next_state)
+    return closure
 
 
 def determinize(nfa: NFA, label_of: dict[int, str], priority: list[str]) -> DFA:
@@ -87,7 +111,65 @@ def determinize(nfa: NFA, label_of: dict[int, str], priority: list[str]) -> DFA:
     omit transitions to it consistently and document your choice).
     """
     # TODO(PART A3): implement
-    raise NotImplementedError("determinize is not implemented yet")
+    dfa = DFA()
+    dfa.alphabet = set(nfa.alphabet)
+    
+    # Priority mapping for tie-breaking
+    priority_map = {name: i for i, name in enumerate(priority)}
+
+    def get_best_label(nfa_states: set[int]) -> str | None:
+        best_label = None
+        best_prio = float('inf')
+        for st in nfa_states:
+            if st in label_of:
+                lbl = label_of[st]
+                prio = priority_map.get(lbl, float('inf'))
+                if prio < best_prio:
+                    best_prio = prio
+                    best_label = lbl
+        return best_label
+
+    start_closure = frozenset(eps_closure(nfa, {nfa.start}))
+    state_mapping: dict[frozenset[int], int] = {start_closure: 0}
+    dfa.states = {0}
+    dfa.start = 0
+
+    if (lbl := get_best_label(set(start_closure))) is not None:
+        dfa.accepts[0] = lbl
+
+    unprocessed = [start_closure]
+    
+    while unprocessed:
+        curr_set = unprocessed.pop()
+        curr_id = state_mapping[curr_set]
+
+        if curr_id not in dfa.transitions:
+            dfa.transitions[curr_id] = {}
+
+        for symbol in dfa.alphabet:
+            next_nfa_states = set()
+            for st in curr_set:
+                if st in nfa.transitions and symbol in nfa.transitions[st]:
+                    next_nfa_states.update(nfa.transitions[st][symbol])
+            
+            if not next_nfa_states:
+                continue
+
+            closure = frozenset(eps_closure(nfa, next_nfa_states))
+            if not closure:
+                continue
+
+            if closure not in state_mapping:
+                new_id = len(state_mapping)
+                state_mapping[closure] = new_id
+                dfa.states.add(new_id)
+                unprocessed.append(closure)
+                if (lbl := get_best_label(set(closure))) is not None:
+                    dfa.accepts[new_id] = lbl
+
+            dfa.transitions[curr_id][symbol] = state_mapping[closure]
+
+    return dfa
 
 
 def build_token_dfa(spec: "TokenSpec") -> DFA:
@@ -98,7 +180,49 @@ def build_token_dfa(spec: "TokenSpec") -> DFA:
     per-class labels and spec-order priority.
     """
     # TODO(PART A3): implement
-    raise NotImplementedError("build_token_dfa is not implemented yet")
+    from .regex import compile_regex
+
+    combined_nfa = NFA()
+    combined_nfa.start = 0
+    combined_nfa.states.add(0)
+    
+    label_of = {}
+    next_state_offset = 1
+
+    for tc in spec.classes:
+        sub_nfa = compile_regex(tc.pattern)
+        
+        # Shift sub_nfa states to avoid collisions
+        shift = next_state_offset - sub_nfa.start
+        shifted_states = {st + shift for st in sub_nfa.states}
+        shifted_accepts = {st + shift for st in sub_nfa.accepts}
+        
+        shifted_transitions = {}
+        for st, trans in sub_nfa.transitions.items():
+            shifted_transitions[st + shift] = {
+                sym: {dst + shift for dst in dests}
+                for sym, dests in trans.items()
+            }
+        
+        combined_nfa.states.update(shifted_states)
+        combined_nfa.alphabet.update(sub_nfa.alphabet)
+        combined_nfa.transitions.update(shifted_transitions)
+        
+        for acc in shifted_accepts:
+            label_of[acc] = tc.name
+        
+        # Connect combined start to sub_nfa start via epsilon
+        if 0 not in combined_nfa.transitions:
+            combined_nfa.transitions[0] = {}
+        if EPS not in combined_nfa.transitions[0]:
+            combined_nfa.transitions[0][EPS] = set()
+        combined_nfa.transitions[0][EPS].add(sub_nfa.start + shift)
+        
+        next_state_offset += len(sub_nfa.states)
+
+    priority = [tc.name for tc in spec.classes]
+    
+    return determinize(combined_nfa, label_of, priority)
 
 
 def scan(dfa: DFA, spec: "TokenSpec", text: str) -> list[Token]:
@@ -111,4 +235,35 @@ def scan(dfa: DFA, spec: "TokenSpec", text: str) -> list[Token]:
     inside a token (e.g. text ending in an identifier).
     """
     # TODO(PART A4): implement
-    raise NotImplementedError("scan is not implemented yet")
+    skip_classes = {tc.name for tc in spec.classes if tc.skip}
+    tokens = []
+    pos = 0
+    n = len(text)
+
+    while pos < n:
+        curr = dfa.start
+        last_accept_pos = -1
+        last_accept_label = None
+        
+        # Maximal Munch exploration
+        curr_pos = pos
+        while curr_pos < n:
+            char = text[curr_pos]
+            if curr in dfa.transitions and char in dfa.transitions[curr]:
+                curr = dfa.transitions[curr][char]
+                curr_pos += 1
+                if curr in dfa.accepts:
+                    last_accept_pos = curr_pos
+                    last_accept_label = dfa.accepts[curr]
+            else:
+                break
+
+        if last_accept_pos != -1:
+            lexeme = text[pos:last_accept_pos]
+            if last_accept_label not in skip_classes:
+                tokens.append(Token(type=last_accept_label, lexeme=lexeme, position=pos))
+            pos = last_accept_pos
+        else:
+            raise ScanError(f"no token at position {pos}", position=pos)
+
+    return tokens
