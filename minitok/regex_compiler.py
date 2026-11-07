@@ -32,19 +32,13 @@ def parse(regex: str) -> _Node:
             tokens.append(("literal", regex[i + 1]))
             i += 2
 
-        elif c == "<":
-            end = regex.find(">", i)
-            if end == -1:
-                raise RegexSyntaxError("Unterminated character class")
+        elif regex.startswith("<letter>", i):
+            tokens.append(("class", "<letter>"))
+            i += len("<letter>")
 
-            shorthand = regex[i:end + 1]
-            if shorthand not in ("<letter>", "<digit>"):
-                raise RegexSyntaxError(
-                    f"Unknown shorthand class: {shorthand}"
-                )
-
-            tokens.append(("class", shorthand))
-            i = end + 1
+        elif regex.startswith("<digit>", i):
+            tokens.append(("class", "<digit>"))
+            i += len("<digit>")
 
         elif c in ("|", "*", "(", ")"):
             tokens.append(("operator", c))
@@ -82,7 +76,7 @@ def parse(regex: str) -> _Node:
         left = parse_star()
 
         while pos < len(tokens):
-            if tokens[pos] == ("operator", "|") or tokens[pos] == ("operator", ")"):
+            if tokens[pos][0] == "operator" and tokens[pos][1] in ("|", ")"):
                 break
 
             right = parse_star()
@@ -116,7 +110,7 @@ def parse(regex: str) -> _Node:
             pos += 1
             return _Node("class", value=value)
 
-        if value == "(":
+        if kind == "operator" and value == "(":
             pos += 1
             node = parse_union()
 
