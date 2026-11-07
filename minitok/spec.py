@@ -36,10 +36,14 @@ def load_spec(source: str | Path) -> TokenSpec:
     if isinstance(source, Path):
         try:
             content = source.read_text(encoding="utf-8")
-        except Exception as e:
+        except (OSError, UnicodeError) as e:
             raise SpecError(f"Failed to read spec file: {e}") from e
-    else:
+
+    elif isinstance(source, str):
         content = source
+
+    else:
+        raise SpecError("Specification source must be a string or Path")
 
     try:
         data = json.loads(content)
@@ -65,7 +69,7 @@ def load_spec(source: str | Path) -> TokenSpec:
         regex = item.get("regex")
         skip = item.get("skip", False)
 
-        if not isinstance(name, str) or not name:
+        if not isinstance(name, str) or not name.strip():
             raise SpecError("Token definition missing or invalid 'name'")
 
         if not isinstance(regex, str):
@@ -74,13 +78,13 @@ def load_spec(source: str | Path) -> TokenSpec:
         if name in seen_names:
             raise SpecError(f"Duplicate token name: '{name}'")
 
-        seen_names.add(name)
-
         if not regex:
             raise SpecError(f"Token '{name}' has an empty regex string")
 
         if not isinstance(skip, bool):
             raise SpecError(f"Token '{name}' has an invalid 'skip' value")
+
+        seen_names.add(name)
 
         try:
             nfa = compile_regex(regex)
