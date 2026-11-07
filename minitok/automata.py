@@ -1,5 +1,5 @@
 
-"""Parts A3/A4 — Finite automata models, determinization, and scanner."""
+"""Parts A3/A4 — Finite automata models, determinization, and the scanner."""
 
 from __future__ import annotations
 
@@ -25,23 +25,22 @@ class NFA:
     accepts: set[int] = field(default_factory=set)
 
     def simulate(self, s: str) -> bool:
-        """Return True if the NFA accepts the input string."""
-
-        current_states = eps_closure(self, {self.start})
+        current = eps_closure(self, {self.start})
 
         for char in s:
             next_states = set()
 
-            for state in current_states:
-                edges = self.transitions.get(state, {})
-                next_states.update(edges.get(char, set()))
+            for state in current:
+                next_states.update(
+                    self.transitions.get(state, {}).get(char, set())
+                )
 
-            current_states = eps_closure(self, next_states)
+            current = eps_closure(self, next_states)
 
-            if not current_states:
+            if not current:
                 return False
 
-        return bool(current_states & self.accepts)
+        return bool(current & self.accepts)
 
 
 @dataclass
@@ -53,17 +52,15 @@ class DFA:
     accepts: dict[int, str] = field(default_factory=dict)
 
     def simulate(self, s: str) -> str | None:
-        """Return the accepting label, or None if rejected."""
-
-        curr = self.start
+        state = self.start
 
         for char in s:
-            if char not in self.transitions.get(curr, {}):
+            if char not in self.transitions.get(state, {}):
                 return None
 
-            curr = self.transitions[curr][char]
+            state = self.transitions[state][char]
 
-        return self.accepts.get(curr)
+        return self.accepts.get(state)
 
 
 @dataclass
@@ -74,8 +71,6 @@ class Token:
 
 
 def eps_closure(nfa: NFA, states: set[int]) -> set[int]:
-    """Return the epsilon closure of a set of NFA states."""
-
     closure = set(states)
     stack = list(states)
 
@@ -95,19 +90,25 @@ def determinize(
     label_of: dict[int, str],
     priority: list[str]
 ) -> DFA:
-    """Convert an NFA into a DFA using subset construction."""
+    start_set = frozenset(eps_closure(nfa, {nfa.start}))
 
-    dfa = DFA()
-    dfa.alphabet = set(nfa.alphabet)
+    state_map = {start_set: 0}
+    queue = [start_set]
 
-    priority_map = {
-        name: index for index, name in enumerate(priority)
-    }
+    dfa = DFA(
+        states={0},
+        alphabet=set(nfa.alphabet),
+        transitions={0: {}},
+        start=0,
+        accepts={}
+    )
 
-    def get_best_label(states):
+    priority_order = {name: i for i, name in enumerate(priority)}
+
+    def get_label(subset):
         labels = [
             label_of[state]
-            for state in states
+            for state in subset
             if state in label_of
         ]
 
@@ -116,158 +117,139 @@ def determinize(
 
         return min(
             labels,
-            key=lambda name: priority_map.get(name, float("inf"))
+            key=lambda name: priority_order.get(name, len(priority_order))
         )
 
-    start_closure = frozenset(
-        eps_closure(nfa, {nfa.start})
-    )
+    label = get_label(start_set)
+    if label is not None:
+        dfa.accepts[0] = label
 
-    state_mapping = {start_closure: 0}
-    dfa.states = {0}
-    dfa.start = 0
+    while queue:
+        current = queue.pop(0)
+        current_id = state_map[current]
 
-    start_label = get_best_label(start_closure)
+        for symbol in sorted(nfa.alphabet):
+            next_set = set()
 
-    if start_label is not None:
-        dfa.accepts[0] = start_label
+            for state in current:
+                next_set.update(
+                    nfa.transitions.get(state, {}).get(symbol, set())
+                )
 
-    unprocessed = [start_closure]
+            next_set = frozenset(eps_closure(nfa, next_set))
 
-    while unprocessed:
-        current_set = unprocessed.pop()
-        current_id = state_mapping[current_set]
-
-        dfa.transitions.setdefault(current_id, {})
-
-        for symbol in dfa.alphabet:
-            next_states = set()
-
-            for state in current_set:
-                edges = nfa.transitions.get(state, {})
-                next_states.update(edges.get(symbol, set()))
-
-            next_closure = frozenset(
-                eps_closure(nfa, next_states)
-            )
-
-            if next_closure not in state_mapping:
-                new_id = len(state_mapping)
-                state_mapping[next_closure] = new_id
+            if next_set not in state_map:
+                new_id = len(state_map)
+                state_map[next_set] = new_id
                 dfa.states.add(new_id)
-                unprocessed.append(next_closure)
+                dfa.transitions[new_id] = {}
+                queue.append(next_set)
 
-                label = get_best_label(next_closure)
-
+                label = get_label(next_set)
                 if label is not None:
                     dfa.accepts[new_id] = label
 
-            dfa.transitions[current_id][symbol] = (
-                state_mapping[next_closure]
-            )
+            dfa.transitions[current_id][symbol] = state_map[next_set]
 
     return dfa
 
 
 def build_token_dfa(spec: "TokenSpec") -> DFA:
-    """Build one DFA for all token classes in the specification."""
+    from regex_compiler import compile_regex
 
-    from .regex_compiler import compile_regex
-
-    combined_nfa = NFA()
-    combined_nfa.start = 0
-    combined_nfa.states.add(0)
+    combined = NFA()
+    combined.start = 0
+    combined.states.add(0)
 
     label_of = {}
-    next_state_offset = 1
+    priority = []
+    next_state = 1
 
-    for tc in spec.tokens:
-        sub_nfa = compile_regex(tc.regex)
+    for token_class in spec.tokens:
+        name = token_class.name
+        regex = token_class.regex
 
-        shift = next_state_offset - sub_nfa.start
+        nfa = compile_regex(regex)
 
-        shifted_states = {
-            state + shift for state in sub_nfa.states
+        mapping = {
+            state: next_state + i
+            for i, state in enumerate(sorted(nfa.states))
         }
 
-        combined_nfa.states.update(shifted_states)
-        combined_nfa.alphabet.update(sub_nfa.alphabet)
+        next_state += len(mapping)
 
-        for state, edges in sub_nfa.transitions.items():
-            new_state = state + shift
+        combined.states.update(mapping.values())
+        combined.alphabet.update(nfa.alphabet)
 
-            combined_nfa.transitions[new_state] = {}
-
-            for symbol, destinations in edges.items():
-                combined_nfa.transitions[new_state][symbol] = {
-                    destination + shift
-                    for destination in destinations
-                }
-
-        for accept_state in sub_nfa.accepts:
-            label_of[accept_state + shift] = tc.name
-
-        combined_nfa.transitions.setdefault(0, {})
-        combined_nfa.transitions[0].setdefault(EPS, set())
-        combined_nfa.transitions[0][EPS].add(
-            sub_nfa.start + shift
+        combined.transitions.setdefault(0, {}).setdefault(EPS, set()).add(
+            mapping[nfa.start]
         )
 
-        next_state_offset += len(sub_nfa.states)
+        for state, transitions in nfa.transitions.items():
+            new_state = mapping[state]
 
-    priority = [tc.name for tc in spec.tokens]
+            combined.transitions.setdefault(new_state, {})
 
-    return determinize(combined_nfa, label_of, priority)
+            for symbol, destinations in transitions.items():
+                combined.transitions[new_state].setdefault(symbol, set()).update(
+                    mapping[destination] for destination in destinations
+                )
+
+        for accept_state in nfa.accepts:
+            label_of[mapping[accept_state]] = name
+
+        priority.append(name)
+
+    return determinize(combined, label_of, priority)
 
 
 def scan(dfa: DFA, spec: "TokenSpec", text: str) -> list[Token]:
-    """Tokenize input using maximal munch and token priority."""
-
-    skip_classes = {
-        tc.name for tc in spec.tokens if tc.skip
+    tokens = []
+    token_map = {
+        token.name: token
+        for token in spec.tokens
     }
 
-    tokens = []
-    pos = 0
-    n = len(text)
+    position = 0
 
-    while pos < n:
-        curr = dfa.start
-        curr_pos = pos
+    while position < len(text):
+        state = dfa.start
+        current = position
 
-        last_accept_pos = -1
-        last_accept_label = None
+        last_accept = None
+        last_end = position
 
-        while curr_pos < n:
-            char = text[curr_pos]
+        while current < len(text):
+            char = text[current]
 
-            if char not in dfa.transitions.get(curr, {}):
+            if char not in dfa.transitions.get(state, {}):
                 break
 
-            curr = dfa.transitions[curr][char]
-            curr_pos += 1
+            state = dfa.transitions[state][char]
+            current += 1
 
-            if curr in dfa.accepts:
-                last_accept_pos = curr_pos
-                last_accept_label = dfa.accepts[curr]
+            if state in dfa.accepts:
+                last_accept = dfa.accepts[state]
+                last_end = current
 
-        if last_accept_pos == -1:
+        if last_accept is None:
             raise ScanError(
-                f"No token at position {pos}",
-                position=pos
+                f"No token matches at position {position}",
+                position
             )
 
-        lexeme = text[pos:last_accept_pos]
+        lexeme = text[position:last_end]
+        token_class = token_map[last_accept]
 
-        if last_accept_label not in skip_classes:
+        if not token_class.skip:
             tokens.append(
                 Token(
-                    type=last_accept_label,
+                    type=last_accept,
                     lexeme=lexeme,
-                    position=pos
+                    position=position
                 )
             )
 
-        pos = last_accept_pos
+        position = last_end
 
     return tokens
