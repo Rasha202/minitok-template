@@ -72,7 +72,7 @@ def load_spec(source: str | Path) -> TokenSpec:
     Returns a TokenSpec preserving the declared order (order defines
     priority for maximal-munch tie-breaking: earlier = higher priority).
     """
-      if isinstance(source, Path):
+    if isinstance(source, Path):
         data = json.loads(source.read_text(encoding="utf-8"))
     else:
         try:
