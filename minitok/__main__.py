@@ -13,6 +13,7 @@ TYPE<TAB>lexeme<TAB>position
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 from .automata import ScanError, build_token_dfa, scan
 from .spec import SpecError, load_spec
@@ -31,7 +32,7 @@ def main(argv: list[str] | None = None) -> int:
     spec_path, input_path = argv[1], argv[2]
 
     try:
-        spec = load_spec(spec_path)
+        spec = load_spec(Path(spec_path))
         dfa = build_token_dfa(spec)
 
         with open(input_path, encoding="utf-8") as fh:
@@ -58,4 +59,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
