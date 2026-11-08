@@ -14,277 +14,333 @@ class RegexSyntaxError(ValueError):
 
 @dataclass
 class _Node:
+    """AST node."""
+
     kind: str
     value: str = ""
     children: list["_Node"] | None = None
 
 
-def parse(regex: str) -> _Node:
+def _tokenize(regex: str) -> list[tuple[str, str]]:
+    if not isinstance(regex, str) or not regex:
+        raise RegexSyntaxError("Regex cannot be empty")
+
     tokens = []
     i = 0
 
     while i < len(regex):
         c = regex[i]
 
-        if c == "\\":
+        if c == '\\':
             if i + 1 >= len(regex):
-                raise RegexSyntaxError("Trailing backslash in regex")
-            tokens.append(("literal", regex[i + 1]))
+                raise RegexSyntaxError("Trailing escape character")
+
+            tokens.append(("LITERAL", regex[i + 1]))
             i += 2
 
-        elif c == "<":
-            end = regex.find(">", i)
+        elif c == '<':
+            end = regex.find('>', i)
 
-            if end == -1:
-                raise RegexSyntaxError("Unclosed shorthand class")
+            if end != -1:
+                name = regex[i + 1:end]
 
-            shorthand = regex[i:end + 1]
+                if name in ("letter", "digit"):
+                    tokens.append(("CLASS", name))
+                    i = end + 1
+                elif name.isidentifier():
+                    raise RegexSyntaxError(
+                        f"Unknown shorthand class: <{name}>"
+                    )
+                else:
+                    tokens.append(("LITERAL", '<'))
+                    i += 1
+            else:
+                tokens.append(("LITERAL", '<'))
+                i += 1
 
-            if shorthand not in ("<letter>", "<digit>"):
-                raise RegexSyntaxError(
-                    f"Unknown shorthand class: {shorthand}"
-                )
-
-            tokens.append(("class", shorthand))
-            i = end + 1
-
-        elif c in ("|", "*", "(", ")"):
-            tokens.append(("operator", c))
+        elif c in ('|', '*', '(', ')'):
+            tokens.append(("OP", c))
             i += 1
 
         else:
-            tokens.append(("literal", c))
+            tokens.append(("LITERAL", c))
             i += 1
+
+    return tokens
+
+
+def parse(regex: str) -> _Node:
+    """Parse a regex string into an AST."""
+
+    try:
+        tokens = _tokenize(regex)
+    except RegexSyntaxError:
+        raise
 
     pos = 0
 
-    def parse_union():
-        nonlocal pos
-        left = parse_concat()
+    def peek():
+        return tokens[pos] if pos < len(tokens) else None
 
-        while pos < len(tokens) and tokens[pos] == ("operator", "|"):
-            pos += 1
-
-            if pos >= len(tokens) or tokens[pos] in (
-                ("operator", "|"),
-                ("operator", ")"),
-            ):
-                raise RegexSyntaxError("Missing expression after |")
-
-            right = parse_concat()
-            left = _Node("union", children=[left, right])
-
-        return left
-
-    def parse_concat():
+    def consume():
         nonlocal pos
 
         if pos >= len(tokens):
-            raise RegexSyntaxError("Missing expression")
+            raise RegexSyntaxError("Unexpected end of regex")
 
-        if tokens[pos] in (
-            ("operator", "|"),
-            ("operator", ")"),
+        token = tokens[pos]
+        pos += 1
+        return token
+
+    def parse_union():
+        node = parse_concat()
+
+        while peek() == ("OP", "|"):
+            consume()
+            right = parse_concat()
+
+            node = _Node(
+                "union",
+                children=[node, right]
+            )
+
+        return node
+
+    def parse_concat():
+        if peek() is None or peek() in (
+            ("OP", "|"),
+            ("OP", ")")
         ):
-            raise RegexSyntaxError("Invalid concatenation")
+            raise RegexSyntaxError("Empty concatenation")
 
-        left = parse_star()
+        node = parse_star()
 
-        while pos < len(tokens):
-            if tokens[pos][0] == "operator" and tokens[pos][1] in ("|", ")"):
-                break
-
+        while peek() is not None and peek() not in (
+            ("OP", "|"),
+            ("OP", ")")
+        ):
             right = parse_star()
-            left = _Node("concat", children=[left, right])
 
-        return left
+            node = _Node(
+                "concat",
+                children=[node, right]
+            )
+
+        return node
 
     def parse_star():
-        nonlocal pos
         node = parse_atom()
 
-        while pos < len(tokens) and tokens[pos] == ("operator", "*"):
-            pos += 1
-            node = _Node("plus", children=[node])
+        while peek() == ("OP", "*"):
+            consume()
+
+            node = _Node(
+                "plus",
+                children=[node]
+            )
 
         return node
 
     def parse_atom():
-        nonlocal pos
+        token = peek()
 
-        if pos >= len(tokens):
-            raise RegexSyntaxError("Missing expression")
+        if token is None:
+            raise RegexSyntaxError("Unexpected end of regex")
 
-        kind, value = tokens[pos]
+        if token[0] == "LITERAL":
+            consume()
+            return _Node("literal", value=token[1])
 
-        if kind == "literal":
-            pos += 1
-            return _Node("literal", value=value)
+        if token[0] == "CLASS":
+            consume()
+            return _Node("class", value=token[1])
 
-        if kind == "class":
-            pos += 1
-            return _Node("class", value=value)
+        if token == ("OP", "("):
+            consume()
 
-        if kind == "operator" and value == "(":
-            pos += 1
             node = parse_union()
 
-            if pos >= len(tokens) or tokens[pos] != ("operator", ")"):
-                raise RegexSyntaxError("Mismatched parentheses")
+            if peek() != ("OP", ")"):
+                raise RegexSyntaxError(
+                    "Unbalanced parentheses"
+                )
 
-            pos += 1
+            consume()
             return node
 
-        raise RegexSyntaxError(f"Invalid atom: {value}")
+        raise RegexSyntaxError(
+            f"Unexpected token: {token}"
+        )
 
-    if not tokens:
-        raise RegexSyntaxError("Empty regex")
-
-    result = parse_union()
+    root = parse_union()
 
     if pos != len(tokens):
-        raise RegexSyntaxError("Invalid regex structure")
+        raise RegexSyntaxError(
+            f"Unexpected token: {tokens[pos]}"
+        )
 
-    return result
+    return root
 
 
 def compile_regex(regex: str) -> NFA:
     """Compile a regex into an NFA using Thompson's construction."""
 
-    ast = parse(regex)
-    state_counter = 0
+    try:
+        root = parse(regex)
+    except RegexSyntaxError:
+        raise
+    except Exception as e:
+        raise RegexSyntaxError(str(e)) from e
+
+    states = set()
+    alphabet = set()
+    transitions = {}
+
+    next_state = 0
 
     def new_state():
-        nonlocal state_counter
-        state = state_counter
-        state_counter += 1
+        nonlocal next_state
+
+        state = next_state
+        next_state += 1
+
+        states.add(state)
+        transitions[state] = {}
+
         return state
 
-    def add_epsilon(transitions, source, destination):
-        transitions.setdefault(source, {})
-        transitions[source].setdefault(EPS, set())
-        transitions[source][EPS].add(destination)
+    def add_transition(source, symbol, destination):
+        transitions[source].setdefault(
+            symbol, set()
+        ).add(destination)
 
-    def build(node):
-        if node.kind == "literal":
+    def compile_node(node: _Node):
+        kind = node.kind
+
+        # LITERAL
+        if kind == "literal":
             start = new_state()
             accept = new_state()
 
-            return NFA(
-                states={start, accept},
-                alphabet={node.value},
-                transitions={start: {node.value: {accept}}},
-                start=start,
-                accepts={accept}
+            symbol = node.value
+            alphabet.add(symbol)
+
+            add_transition(
+                start, symbol, accept
             )
 
-        if node.kind == "class":
+            return start, accept
+
+        # CLASS
+        if kind == "class":
             start = new_state()
             accept = new_state()
 
-            if node.value == "<letter>":
-                chars = set(
-                    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            if node.value == "letter":
+                characters = (
+                    "abcdefghijklmnopqrstuvwxyz"
+                    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
                 )
+
+            elif node.value == "digit":
+                characters = "0123456789"
+
             else:
-                chars = set("0123456789")
+                raise RegexSyntaxError(
+                    f"Unknown class: {node.value}"
+                )
 
-            return NFA(
-                states={start, accept},
-                alphabet=chars,
-                transitions={
-                    start: {char: {accept} for char in chars}
-                },
-                start=start,
-                accepts={accept}
+            for char in characters:
+                alphabet.add(char)
+
+                add_transition(
+                    start, char, accept
+                )
+
+            return start, accept
+
+        # CONCATENATION
+        if kind == "concat":
+            left_start, left_accept = compile_node(
+                node.children[0]
             )
 
-        if node.kind == "concat":
-            left = build(node.children[0])
-            right = build(node.children[1])
-
-            transitions = {
-                state: {
-                    symbol: set(destinations)
-                    for symbol, destinations in edges.items()
-                }
-                for state, edges in left.transitions.items()
-            }
-
-            for state, edges in right.transitions.items():
-                transitions[state] = {
-                    symbol: set(destinations)
-                    for symbol, destinations in edges.items()
-                }
-
-            for accept in left.accepts:
-                add_epsilon(transitions, accept, right.start)
-
-            return NFA(
-                states=left.states | right.states,
-                alphabet=left.alphabet | right.alphabet,
-                transitions=transitions,
-                start=left.start,
-                accepts=set(right.accepts)
+            right_start, right_accept = compile_node(
+                node.children[1]
             )
 
-        if node.kind == "union":
-            left = build(node.children[0])
-            right = build(node.children[1])
+            add_transition(
+                left_accept,
+                EPS,
+                right_start
+            )
 
+            return left_start, right_accept
+
+        # UNION
+        if kind == "union":
             start = new_state()
             accept = new_state()
 
-            transitions = {
-                state: {
-                    symbol: set(destinations)
-                    for symbol, destinations in edges.items()
-                }
-                for state, edges in left.transitions.items()
-            }
-
-            for state, edges in right.transitions.items():
-                transitions[state] = {
-                    symbol: set(destinations)
-                    for symbol, destinations in edges.items()
-                }
-
-            add_epsilon(transitions, start, left.start)
-            add_epsilon(transitions, start, right.start)
-
-            for state in left.accepts | right.accepts:
-                add_epsilon(transitions, state, accept)
-
-            return NFA(
-                states=left.states | right.states | {start, accept},
-                alphabet=left.alphabet | right.alphabet,
-                transitions=transitions,
-                start=start,
-                accepts={accept}
+            left_start, left_accept = compile_node(
+                node.children[0]
             )
 
-        if node.kind == "plus":
-            child = build(node.children[0])
-
-            transitions = {
-                state: {
-                    symbol: set(destinations)
-                    for symbol, destinations in edges.items()
-                }
-                for state, edges in child.transitions.items()
-            }
-
-            for accept in child.accepts:
-                add_epsilon(transitions, accept, child.start)
-
-            return NFA(
-                states=set(child.states),
-                alphabet=set(child.alphabet),
-                transitions=transitions,
-                start=child.start,
-                accepts=set(child.accepts)
+            right_start, right_accept = compile_node(
+                node.children[1]
             )
 
-        raise RegexSyntaxError(f"Unknown node type: {node.kind}")
+            add_transition(
+                start, EPS, left_start
+            )
 
-    return build(ast)
+            add_transition(
+                start, EPS, right_start
+            )
+
+            add_transition(
+                left_accept, EPS, accept
+            )
+
+            add_transition(
+                right_accept, EPS, accept
+            )
+
+            return start, accept
+
+        # PLUS (ONE OR MORE)
+        if kind == "plus":
+            start = new_state()
+            accept = new_state()
+
+            inner_start, inner_accept = compile_node(
+                node.children[0]
+            )
+
+            add_transition(
+                start, EPS, inner_start
+            )
+
+            add_transition(
+                inner_accept, EPS, inner_start
+            )
+
+            add_transition(
+                inner_accept, EPS, accept
+            )
+
+            return start, accept
+
+        raise RegexSyntaxError(
+            f"Unknown AST node type: {kind}"
+        )
+
+    start, accept = compile_node(root)
+
+    return NFA(
+        states=states,
+        alphabet=alphabet,
+        transitions=transitions,
+        start=start,
+        accepts={accept}
+    )
